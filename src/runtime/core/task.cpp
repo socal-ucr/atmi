@@ -43,6 +43,9 @@ pthread_mutex_t mutex_readyq_;
 #include "hsa_ext_amd.h"
 
 extern bool handle_signal(hsa_signal_value_t value, void *arg);
+extern bool set_cu_mask_callback(hsa_signal_value_t value, void *arg);
+
+
 
 void print_atl_kernel(const char *str, const int i);
 
@@ -824,6 +827,42 @@ bool handle_group_signal(hsa_signal_value_t value, void *arg) {
   return false;
 }
 
+bool set_cu_mask_callback(hsa_signal_value_t value, void *arg) {
+  printf("CUMASKCALLBACK\n");
+  ComputeTaskImpl* task = reinterpret_cast<ComputeTaskImpl*>(arg);
+  hsa_queue_t *queue = task->queue;
+
+  static bool first = true;
+  std::vector<uint32_t> cu_mask = {0,0};
+  uint32_t bitPosition;
+  if (first) {
+      bitPosition = 0;
+      first = false;
+  }
+  else {
+     bitPosition = 1;
+     first = true;
+  }
+
+  if (bitPosition < 32) {
+      cu_mask[0] |= 1UL << bitPosition;
+  }
+  else {
+      cu_mask[1] |= 1UL << (bitPosition - 32);
+  }
+
+  hsa_status_t status = hsa_amd_queue_cu_set_mask(queue, cu_mask.size() * 32, cu_mask.data());
+
+   if (status != HSA_STATUS_SUCCESS) {
+    printf("hsa_amd_queue_cu_set_mask failed: 0x%lx\n",status);
+  }
+
+  hsa_signal_store_relaxed(task->cu_mask_signal,0);
+
+
+  return false;
+}
+
 void TaskImpl::doProgress() {
   if (g_dep_sync_type == ATL_SYNC_CALLBACK) {
     if (taskgroup_obj_->ordered_) {
@@ -1174,6 +1213,42 @@ void ComputeTaskImpl::acquireAqlPacket() {
                       &(and_predecessors_[0]), SNK_NOWAIT, SNK_AND, devtype_);
     }
   }
+  this->queue = this_Q;
+  //Add set cu mask packet
+
+  uint64_t barrier_index = hsa_queue_add_write_index_relaxed(this_Q, 1);
+    // Wait until the queue is not full before writing the packet
+  while (barrier_index - hsa_queue_load_read_index_acquire(this_Q) >= this_Q->size) {
+  }
+  uint32_t queueMask = this_Q->size - 1;
+  hsa_barrier_and_packet_t *cu_mask_barrier =
+  &(reinterpret_cast<hsa_barrier_and_packet_t *>(
+        this_Q->base_address)[barrier_index & queueMask]);
+  memset(cu_mask_barrier, 0, sizeof(hsa_barrier_and_packet_t));
+  cu_mask_barrier->header = create_header(HSA_PACKET_TYPE_BARRIER_AND, 1,
+                        ATMI_FENCE_SCOPE_SYSTEM, ATMI_FENCE_SCOPE_SYSTEM);
+  hsa_amd_signal_create(1, 0, nullptr,0, &(cu_mask_barrier->completion_signal));
+  hsa_amd_signal_async_handler(cu_mask_barrier->completion_signal,
+                              HSA_SIGNAL_CONDITION_EQ, 0,
+                              set_cu_mask_callback,
+                              reinterpret_cast<void*>(this));
+  hsa_signal_store_relaxed(this_Q->doorbell_signal, barrier_index);
+
+
+  barrier_index = hsa_queue_add_write_index_relaxed(this_Q, 1);
+    // Wait until the queue is not full before writing the packet
+  while (barrier_index - hsa_queue_load_read_index_acquire(this_Q) >= this_Q->size) {
+  }
+  queueMask = this_Q->size - 1;
+  hsa_barrier_and_packet_t *cu_mask_wait_barrier =
+  &(reinterpret_cast<hsa_barrier_and_packet_t *>(
+        this_Q->base_address)[barrier_index & queueMask]);
+  memset(cu_mask_wait_barrier, 0, sizeof(hsa_barrier_and_packet_t));
+  cu_mask_wait_barrier->header = create_header(HSA_PACKET_TYPE_BARRIER_AND, 1,
+                        ATMI_FENCE_SCOPE_SYSTEM, ATMI_FENCE_SCOPE_SYSTEM);
+  hsa_amd_signal_create(1, 0, nullptr,0, &(cu_mask_signal));
+  cu_mask_wait_barrier->dep_signal[0] = cu_mask_signal;
+  hsa_signal_store_relaxed(this_Q->doorbell_signal, barrier_index);
 
   if (devtype_ == ATMI_DEVTYPE_GPU) {
     hsa_signal_add_acq_rel(signal_, 1);

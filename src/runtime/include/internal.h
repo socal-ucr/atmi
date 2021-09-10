@@ -255,6 +255,8 @@ void init_dag_scheduler();
 bool handle_signal(hsa_signal_value_t value, void *arg);
 bool handle_group_signal(hsa_signal_value_t value, void *arg);
 
+bool set_cu_mask_callback(hsa_signal_value_t value, void *arg);
+
 void enqueue_barrier_tasks(std::vector<TaskImpl *> tasks);
 hsa_signal_t enqueue_barrier_async(TaskImpl *task, hsa_queue_t *queue,
                                    const int dep_task_count,

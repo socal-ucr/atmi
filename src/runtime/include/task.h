@@ -152,6 +152,9 @@ class ComputeTaskImpl : public TaskImpl {
   // dimensions of the compute grid to be launched
   unsigned long gridDim_[3];
   unsigned long groupDim_[3];
+
+  hsa_queue_t * queue;
+  hsa_signal_t cu_mask_signal;
 };  // class ComputeTaskImpl
 
 class DataTaskImpl : public TaskImpl {
